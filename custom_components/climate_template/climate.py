@@ -59,6 +59,8 @@ from homeassistant.helpers.entity import async_generate_entity_id
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers.event import async_track_time_interval
+from datetime import timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -93,6 +95,8 @@ CONF_SET_HVAC_MODE_ACTION = "set_hvac_mode"
 CONF_SET_FAN_MODE_ACTION = "set_fan_mode"
 CONF_SET_PRESET_MODE_ACTION = "set_preset_mode"
 CONF_SET_SWING_MODE_ACTION = "set_swing_mode"
+CONF_SET_TIMER_ACTION = "set_timer_action"
+CONF_SET_TIMER_INTERVAL = "set_timer_interval"
 
 CONF_CLIMATES = "climates"
 
@@ -100,6 +104,9 @@ DEFAULT_NAME = "Template Climate"
 DEFAULT_TEMP = 21
 DEFAULT_PRECISION = 1.0
 DOMAIN = "climate_template"
+
+CONF_TIMER_ACTION = "timer_action"
+CONF_TIMER_INTERVAL = "timer_interval"
 
 PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
     {
@@ -165,6 +172,10 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
         ),
         vol.Optional(CONF_TEMP_STEP, default=DEFAULT_PRECISION): vol.Coerce(float),
         vol.Optional(CONF_UNIQUE_ID): cv.string,
+        vol.Optional(CONF_TIMER_ACTION): cv.SCRIPT_SCHEMA,
+        vol.Optional(CONF_TIMER_INTERVAL, default=1): vol.Coerce(int),
+        vol.Optional(CONF_SET_TIMER_ACTION): cv.SCRIPT_SCHEMA,
+        vol.Optional(CONF_SET_TIMER_INTERVAL, default=1): vol.Coerce(int),
     }
 )
 
@@ -305,6 +316,22 @@ class TemplateClimate(TemplateEntity, ClimateEntity, RestoreEntity):
             else:
                 self._attr_supported_features |= ClimateEntityFeature.TARGET_TEMPERATURE
 
+        self._timer_action_script = None
+        self._timer_interval = config.get(CONF_TIMER_INTERVAL, 1)
+        self._timer_remove = None
+        if timer_action := config.get(CONF_TIMER_ACTION):
+            self._timer_action_script = Script(
+                hass, timer_action, self._attr_name, DOMAIN
+            )
+
+        self._set_timer_action_script = None
+        self._set_timer_interval = config.get(CONF_SET_TIMER_INTERVAL, 1)
+        self._set_timer_remove = None
+        if set_timer_action := config.get(CONF_SET_TIMER_ACTION):
+            self._set_timer_action_script = Script(
+                hass, set_timer_action, self._attr_name, DOMAIN
+            )
+
     async def async_added_to_hass(self):
         """Run when entity about to be added."""
         await super().async_added_to_hass()
@@ -356,6 +383,20 @@ class TemplateClimate(TemplateEntity, ClimateEntity, RestoreEntity):
 
             if humidity := previous_state.attributes.get(ATTR_HUMIDITY):
                 self._attr_target_humidity = humidity
+
+        if self._timer_action_script:
+            self._timer_remove = async_track_time_interval(
+                self.hass,
+                self._async_run_timer_action,
+                timedelta(minutes=self._timer_interval),
+            )
+
+        if self._set_timer_action_script:
+            self._set_timer_remove = async_track_time_interval(
+                self.hass,
+                self._async_run_set_timer_action,
+                timedelta(minutes=self._set_timer_interval),
+            )
 
     @callback
     def _async_setup_templates(self) -> None:
@@ -799,5 +840,30 @@ class TemplateClimate(TemplateEntity, ClimateEntity, RestoreEntity):
             await self.async_run_script(
                 self._set_humidity_script,
                 run_variables={ATTR_HUMIDITY: humidity},
+                context=self._context,
+            )
+
+    async def async_will_remove_from_hass(self):
+        if self._timer_remove:
+            self._timer_remove()
+            self._timer_remove = None
+        if self._set_timer_remove:
+            self._set_timer_remove()
+            self._set_timer_remove = None
+        await super().async_will_remove_from_hass()
+
+    async def _async_run_timer_action(self, now):
+        if self._timer_action_script:
+            await self.async_run_script(
+                self._timer_action_script,
+                run_variables={},
+                context=self._context,
+            )
+
+    async def _async_run_set_timer_action(self, now):
+        if self._set_timer_action_script:
+            await self.async_run_script(
+                self._set_timer_action_script,
+                run_variables={},
                 context=self._context,
             )
